@@ -125,6 +125,7 @@ class VioDataset {
       const = 0;
   virtual int64_t get_mocap_to_imu_offset_ns() const = 0;
   virtual std::vector<ImageData> get_image_data(int64_t t_ns) = 0;
+  virtual void setDownsample( const int downsample_num ) {};
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };

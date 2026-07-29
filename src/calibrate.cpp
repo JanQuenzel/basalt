@@ -45,6 +45,7 @@ int main(int argc, char** argv) {
   std::vector<std::string> cam_types;
   std::string cache_dataset_name = "calib-cam";
   int skip_images = 1;
+  int downsample_num = 0;
   bool no_gui = false;
 
   CLI::App app{"Calibrate IMU"};
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
                  "Name to save cached files");
 
   app.add_option("--skip-images", skip_images, "Number of images to skip");
+  app.add_option("--downsample-num", downsample_num, "downsample x times (0=no downsampling)");
   app.add_option("--cam-types", cam_types,
                  "Type of cameras (eucm, ds, kb4, pinhole)")
       ->required();
@@ -75,7 +77,7 @@ int main(int argc, char** argv) {
   }
 
   basalt::CamCalib cv(dataset_path, dataset_type, aprilgrid_path, result_path,
-                      cache_dataset_name, skip_images, cam_types, !no_gui);
+                      cache_dataset_name, skip_images, cam_types, downsample_num, !no_gui);
 
   if (no_gui) {
     cv.loadDataset();
