@@ -54,13 +54,15 @@ CamCalib::CamCalib(const std::string& dataset_path,
                    const std::string& aprilgrid_path,
                    const std::string& cache_path,
                    const std::string& cache_dataset_name, int skip_images,
-                   const std::vector<std::string>& cam_types, bool show_gui)
+                   const std::vector<std::string>& cam_types,
+                   const int downsample_num, bool show_gui)
     : dataset_path(dataset_path),
       dataset_type(dataset_type),
       april_grid(aprilgrid_path),
       cache_path(ensure_trailing_slash(cache_path)),
       cache_dataset_name(cache_dataset_name),
       skip_images(skip_images),
+      downsample_num(downsample_num),
       cam_types(cam_types),
       show_gui(show_gui),
       show_frame("ui.show_frame", 0, 0, 1500),
@@ -798,6 +800,7 @@ void CamCalib::loadDataset() {
   dataset_io->read(dataset_path);
 
   vio_dataset = dataset_io->get_data();
+  vio_dataset->setDownsample (downsample_num);
   setNumCameras(vio_dataset->get_num_cams());
 
   if (skip_images > 1) {

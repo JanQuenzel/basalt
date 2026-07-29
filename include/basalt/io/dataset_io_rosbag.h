@@ -51,7 +51,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <geometry_msgs/TransformStamped.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/Imu.h>
-
+#include <sensor_msgs/CompressedImage.h>
+#include <opencv2/opencv.hpp>
 #include <basalt/utils/filesystem.h>
 
 namespace basalt {
@@ -67,7 +68,7 @@ class RosbagVioDataset : public VioDataset {
   // vector of images for every timestamp
   // assumes vectors size is num_cams for every timestamp with null pointers for
   // missing frames
-  std::unordered_map<int64_t, std::vector<std::optional<rosbag::IndexEntry>>>
+  std::unordered_map<int64_t, std::vector<std::pair<std::optional<rosbag::IndexEntry>,bool>>>
       image_data_idx;
 
   Eigen::aligned_vector<AccelData> accel_data;
@@ -78,6 +79,7 @@ class RosbagVioDataset : public VioDataset {
       gt_pose_data;  // TODO: change to eigen aligned
 
   int64_t mocap_to_imu_offset_ns;
+  int downsample_num = 0;
 
  public:
   ~RosbagVioDataset() {}
@@ -101,6 +103,63 @@ class RosbagVioDataset : public VioDataset {
 
   int64_t get_mocap_to_imu_offset_ns() const { return mocap_to_imu_offset_ns; }
 
+  void setDownsample( const int num_downsample )
+  {
+    downsample_num = num_downsample;
+  }
+
+  sensor_msgs::ImagePtr compressedToRawImage(
+      const sensor_msgs::CompressedImageConstPtr& compressed_msg,
+      const std::string& target_encoding = "mono8" ) //"bgr8")
+  {
+      // 1. Decode the compressed byte vector into an OpenCV cv::Mat matrix
+      //cv::Mat image = cv::imdecode(cv::Mat(compressed_msg->data), cv::IMREAD_COLOR);
+      cv::Mat image = cv::imdecode(cv::Mat(compressed_msg->data), cv::IMREAD_UNCHANGED);
+
+      if (image.empty()) {
+          return nullptr;
+      }
+
+      if ( downsample_num > 0 )
+      {
+          const cv::Size old_size ( image.rows, image.cols );
+          cv::resize(image, image, cv::Size(), 0.5, 0.5, cv::INTER_CUBIC);
+          static bool printed = false;
+          if (!printed){
+              std::cerr << "Resized: " << old_size << " to " << cv::Size(image.rows, image.cols)
+                        << std::endl;
+              printed = true;
+          }
+      }
+
+
+      // 2. Instantiate the destination raw image message
+      sensor_msgs::ImagePtr raw_msg(new sensor_msgs::Image());
+
+      // Copy original metadata header (timestamp and frame_id)
+      raw_msg->header = compressed_msg->header;
+
+      // Set dimensions and spatial metadata
+      raw_msg->height = image.rows;
+      raw_msg->width = image.cols;
+      raw_msg->encoding = target_encoding;
+      raw_msg->is_bigendian = 0; // Standard little-endian for x86 architectures
+
+      // 3. Compute step size (Bytes per row)
+      // channels() = 3 for BGR/RGB, elemSize1() = 1 byte for 8-bit channels
+      size_t num_channels = image.channels();
+      size_t bytes_per_pixel = image.elemSize1() * num_channels;
+      raw_msg->step = raw_msg->width * bytes_per_pixel;
+
+      // 4. Copy matrix pixel memory buffer into ROS vector message
+      size_t data_size = raw_msg->step * raw_msg->height;
+      raw_msg->data.resize(data_size);
+      std::memcpy(&raw_msg->data[0], image.data, data_size);
+
+      return raw_msg;
+  }
+
+
   std::vector<ImageData> get_image_data(int64_t t_ns) {
     std::vector<ImageData> res(num_cams);
 
@@ -110,12 +169,19 @@ class RosbagVioDataset : public VioDataset {
       for (size_t i = 0; i < num_cams; i++) {
         ImageData& id = res[i];
 
-        if (!it->second[i].has_value()) continue;
+        if (!it->second[i].first.has_value()) continue;
+        sensor_msgs::ImageConstPtr img_msg = nullptr;
 
         m.lock();
-        sensor_msgs::ImageConstPtr img_msg =
-            bag->instantiateBuffer<sensor_msgs::Image>(*it->second[i]);
+        if ( it->second[i].second ){
+            sensor_msgs::CompressedImagePtr comp_msg = bag->instantiateBuffer<sensor_msgs::CompressedImage>(*it->second[i].first);
+            img_msg = compressedToRawImage(comp_msg);
+        }
+        else {
+            img_msg = bag->instantiateBuffer<sensor_msgs::Image>(*it->second[i].first);
+        }
         m.unlock();
+        if ( img_msg == nullptr ) continue;
 
         //        std::cerr << "img_msg->width " << img_msg->width << "
         //        img_msg->height "
@@ -178,6 +244,7 @@ class RosbagIO : public DatasetIoInterface {
         view.getConnections();
 
     std::set<std::string> cam_topics;
+    std::set<std::string> comp_topics;
     std::string imu_topic;
     std::string mocap_topic;
     std::string point_topic;
@@ -194,6 +261,8 @@ class RosbagIO : public DatasetIoInterface {
 
       if (info->datatype == std::string("sensor_msgs/Image")) {
         cam_topics.insert(info->topic);
+      } else if (info->datatype == std::string("sensor_msgs/CompressedImage")) {
+        comp_topics.insert(info->topic);
       } else if (info->datatype == std::string("sensor_msgs/Imu") &&
                  info->topic.rfind("/fcu", 0) != 0) {
         imu_topic = info->topic;
@@ -210,6 +279,7 @@ class RosbagIO : public DatasetIoInterface {
     std::cout << "mocap_topic: " << mocap_topic << std::endl;
     std::cout << "cam_topics: ";
     for (const std::string& s : cam_topics) std::cout << s << " ";
+    for (const std::string &s : comp_topics) std::cout << s << " ";
     std::cout << std::endl;
 
     std::map<std::string, int> topic_to_id;
@@ -218,8 +288,11 @@ class RosbagIO : public DatasetIoInterface {
       topic_to_id[s] = idx;
       idx++;
     }
-
-    data->num_cams = cam_topics.size();
+    for (const std::string &s : comp_topics) {
+      topic_to_id[s] = idx;
+      idx++;
+    }
+    data->num_cams = cam_topics.size() + comp_topics.size();
 
     int num_msgs = 0;
 
@@ -247,7 +320,23 @@ class RosbagIO : public DatasetIoInterface {
         auto& img_vec = data->image_data_idx[timestamp_ns];
         if (img_vec.size() == 0) img_vec.resize(data->num_cams);
 
-        img_vec[topic_to_id.at(topic)] = m.index_entry_;
+        img_vec[topic_to_id.at(topic)].first = m.index_entry_;
+        image_timestamps.insert(timestamp_ns);
+
+        min_time = std::min(min_time, timestamp_ns);
+        max_time = std::max(max_time, timestamp_ns);
+      }
+
+      if (comp_topics.find(topic) != comp_topics.end()) {
+        sensor_msgs::CompressedImageConstPtr img_msg =
+            m.instantiate<sensor_msgs::CompressedImage>();
+        int64_t timestamp_ns = img_msg->header.stamp.toNSec();
+
+        auto &img_vec = data->image_data_idx[timestamp_ns];
+        if (img_vec.size() == 0) img_vec.resize(data->num_cams);
+
+        img_vec[topic_to_id.at(topic)].first = m.index_entry_;
+        img_vec[topic_to_id.at(topic)].second = true;
         image_timestamps.insert(timestamp_ns);
 
         min_time = std::min(min_time, timestamp_ns);
