@@ -114,7 +114,7 @@ class RosbagVioDataset : public VioDataset {
   {
       // 1. Decode the compressed byte vector into an OpenCV cv::Mat matrix
       //cv::Mat image = cv::imdecode(cv::Mat(compressed_msg->data), cv::IMREAD_COLOR);
-      cv::Mat image = cv::imdecode(cv::Mat(compressed_msg->data), cv::IMREAD_UNCHANGED);
+      cv::Mat image = cv::imdecode(cv::Mat(compressed_msg->data), cv::IMREAD_GRAYSCALE);
 
       if (image.empty()) {
           return nullptr;
